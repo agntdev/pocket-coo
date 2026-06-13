@@ -12,6 +12,7 @@ import {
   getDigestMarkdown,
   startDigestScheduler,
 } from "./services/weekly-digest";
+import { startPatternScheduler } from "./services/pattern-detection";
 
 export interface BotSession {
   step: string;
@@ -438,9 +439,29 @@ bot.command("digest", async (ctx) => {
 
 // === Command: /patterns ===
 bot.command("patterns", async (ctx) => {
-  await ctx.reply("🔍 *Patterns*\n\nNo recurring phrases detected yet.", {
-    parse_mode: "Markdown",
-  });
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const db = getDb();
+  const patterns = db.prepare(
+    "SELECT phrase, occurrences FROM patterns WHERE user_tg_id = ? ORDER BY occurrences DESC LIMIT 10",
+  ).all(userId) as { phrase: string; occurrences: number }[];
+
+  if (patterns.length === 0) {
+    await ctx.reply("🔍 *Patterns*\n\nNo recurring phrases detected yet.", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  const lines: string[] = ["🔍 *Recurring Phrases*"];
+  for (const p of patterns) {
+    lines.push(`  • "${p.phrase}" — ${p.occurrences}×`);
+  }
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
 });
 
 // === Command: /export ===
@@ -1181,6 +1202,7 @@ bot.on("message:document", async (ctx) => {
 
 // === Start long polling ===
 startDigestScheduler(bot);
+startPatternScheduler(bot);
 bot.start({
   onStart(info) {
     console.log(`Bot started as @${info.username}`);
