@@ -352,8 +352,72 @@ bot.command("risks", async (ctx) => {
 
 // === Command: /followups ===
 bot.command("followups", async (ctx) => {
-  await ctx.reply("⏰ *Follow-ups*\n\nNo pending follow-ups.", {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const db = getDb();
+  const followUps = db
+    .prepare(
+      `SELECT f.id, f.ref_kind, f.ref_id, f.deadline, f.priority, f.status, f.created_at,
+              CASE f.ref_kind
+                WHEN 'task' THEN (SELECT title FROM tasks WHERE id = f.ref_id)
+                WHEN 'decision' THEN (SELECT context FROM decisions WHERE id = f.ref_id)
+                WHEN 'risk' THEN (SELECT description FROM risks WHERE id = f.ref_id)
+              END as ref_title
+       FROM follow_ups f
+       WHERE f.user_tg_id = ? AND f.status = 'pending'
+       ORDER BY f.deadline ASC LIMIT 20`,
+    )
+    .all(userId) as {
+    id: number;
+    ref_kind: string;
+    ref_id: number;
+    deadline: string;
+    priority: string;
+    status: string;
+    created_at: string;
+    ref_title: string | null;
+  }[];
+
+  if (followUps.length === 0) {
+    const keyboard = new InlineKeyboard().text(
+      "➕ New Follow-up",
+      "followups:new",
+    );
+    await ctx.reply("⏰ *Follow-ups*\n\nNo pending follow-ups.", {
+      parse_mode: "Markdown",
+      reply_markup: keyboard,
+    });
+    return;
+  }
+
+  const lines: string[] = ["⏰ *Follow-ups*"];
+  const keyboard = new InlineKeyboard();
+  for (const f of followUps) {
+    const refKindIcon =
+      f.ref_kind === "task" ? "✅" : f.ref_kind === "decision" ? "🧭" : "⚠️";
+    const priorityIcon =
+      f.priority === "high"
+        ? "🔴"
+        : f.priority === "med"
+        ? "🟡"
+        : "🟢";
+    const refTitle = f.ref_title ? f.ref_title.slice(0, 60) : `#${f.ref_id}`;
+    lines.push("");
+    lines.push(
+      `*#${f.id}* ${priorityIcon} — ${refKindIcon} ${refTitle}`,
+    );
+    lines.push(`  ⏰ Deadline: ${f.deadline}`);
+    keyboard.text(`✅ Done #${f.id}`, `fw:done:${f.id}`);
+    keyboard.text(`❌ Dismiss #${f.id}`, `fw:dismiss:${f.id}`).row();
+  }
+  keyboard.text("➕ New Follow-up", "followups:new");
+
+  await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
+    reply_markup: keyboard,
   });
 });
 
@@ -690,17 +754,17 @@ bot.callbackQuery(
       ctx.session.captureCategory = undefined;
       return;
     } else if (category === "followup") {
-      const taskInfo = db
-        .prepare(
-          `INSERT INTO tasks (project_id, user_tg_id, title, source_message_id)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(projectId, userId, captureText, Number(captureMsgId) || null);
-      ctx.session.data.followupRefTaskId = taskInfo.lastInsertRowid;
-      ctx.session.step = "followup:create:deadline";
-      await ctx.reply(
-        `✅ Task #${taskInfo.lastInsertRowid} created as ref. ⏰ When is the deadline?`,
-      );
+      const title = captureText || (ctx.session.data.followupTitle as string) || "";
+      ctx.session.data.followupProjectId = projectId;
+      ctx.session.data.followupTitle = title;
+      ctx.session.step = "followup:create:refkind";
+      const refKindKeyboard = new InlineKeyboard()
+        .text("✅ Task", "fw:refkind:task")
+        .text("🧭 Decision", "fw:refkind:decision")
+        .text("⚠️ Risk", "fw:refkind:risk");
+      await ctx.reply("⏰ Follow-up — what does this reference?", {
+        reply_markup: refKindKeyboard,
+      });
       ctx.session.captureText = undefined;
       ctx.session.captureMsgId = undefined;
       ctx.session.captureCategory = undefined;
@@ -727,6 +791,137 @@ bot.callbackQuery("digest:now", async (ctx) => {
   } catch {
     await ctx.reply(digestMd);
   }
+});
+
+// === Callback routing: follow-up ref_kind selection ===
+bot.callbackQuery(/^fw:refkind:(task|decision|risk)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const refKind = ctx.match[1] as "task" | "decision" | "risk";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const title = ctx.session.data.followupTitle as string;
+  const projectId = ctx.session.data.followupProjectId as number | null;
+  const captureMsgId = ctx.session.captureMsgId;
+  const db = getDb();
+
+  let refId: number;
+  if (refKind === "task") {
+    const info = db
+      .prepare(
+        `INSERT INTO tasks (project_id, user_tg_id, title, source_message_id)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(projectId, userId, title, Number(captureMsgId) || null);
+    refId = Number(info.lastInsertRowid);
+  } else if (refKind === "decision") {
+    const info = db
+      .prepare(
+        `INSERT INTO decisions (project_id, user_tg_id, context)
+         VALUES (?, ?, ?)`,
+      )
+      .run(projectId, userId, title);
+    refId = Number(info.lastInsertRowid);
+  } else {
+    const info = db
+      .prepare(
+        `INSERT INTO risks (project_id, user_tg_id, description)
+         VALUES (?, ?, ?)`,
+      )
+      .run(projectId, userId, title);
+    refId = Number(info.lastInsertRowid);
+  }
+
+  ctx.session.data.followupRefKind = refKind;
+  ctx.session.data.followupRefId = refId;
+  ctx.session.data.followupTitle = undefined;
+  ctx.session.step = "followup:create:deadline";
+
+  const kindLabel =
+    refKind === "task"
+      ? "✅ Task"
+      : refKind === "decision"
+      ? "🧭 Decision"
+      : "⚠️ Risk";
+  await ctx.reply(
+    `${kindLabel} #${refId} created as reference.\n\n⏰ When is the deadline? (e.g. "tomorrow", "Friday", "2026-07-01")`,
+  );
+});
+
+// === Callback routing: follow-up priority selection ===
+bot.callbackQuery(/^fw:pri:(high|med|low)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const priority = ctx.match[1] as "high" | "med" | "low";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const refKind = ctx.session.data.followupRefKind as string;
+  const refId = ctx.session.data.followupRefId as number;
+  const deadline = ctx.session.data.followupDeadline as string;
+  if (!refKind || !refId || !deadline) {
+    ctx.session.step = "idle";
+    await ctx.reply("⚠️ Something went wrong. Please try again.");
+    return;
+  }
+
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO follow_ups (user_tg_id, ref_kind, ref_id, deadline, priority)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(userId, refKind, refId, deadline, priority);
+
+  const info = db.prepare("SELECT last_insert_rowid() as id").get() as {
+    id: number;
+  };
+  const priorityLabel =
+    priority === "high"
+      ? "🔴 High"
+      : priority === "med"
+      ? "🟡 Medium"
+      : "🟢 Low";
+
+  ctx.session.data.followupRefKind = undefined;
+  ctx.session.data.followupRefId = undefined;
+  ctx.session.data.followupDeadline = undefined;
+  ctx.session.data.followupProjectId = undefined;
+  ctx.session.step = "idle";
+
+  await ctx.reply(
+    `⏰ Follow-up #${info.id} created! Deadline: ${deadline}, Priority: ${priorityLabel}`,
+  );
+});
+
+// === Callback routing: follow-up standalone creation ===
+bot.callbackQuery("followups:new", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "followup:create:title";
+  await ctx.reply("⏰ New follow-up — what do you need to follow up on?");
+});
+
+// === Callback routing: follow-up mark done ===
+bot.callbackQuery(/^fw:done:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const fwId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    `UPDATE follow_ups SET status = 'done', notified_at = datetime('now') WHERE id = ? AND user_tg_id = ?`,
+  ).run(fwId, userId);
+  await ctx.reply(`✅ Follow-up #${fwId} marked as done.`);
+});
+
+// === Callback routing: follow-up dismiss ===
+bot.callbackQuery(/^fw:dismiss:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const fwId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    `UPDATE follow_ups SET status = 'dismissed', notified_at = datetime('now') WHERE id = ? AND user_tg_id = ?`,
+  ).run(fwId, userId);
+  await ctx.reply(`❌ Follow-up #${fwId} dismissed.`);
 });
 
 // === Fallback for unrecognized callback data ===
@@ -853,20 +1048,84 @@ bot.on("message:text", async (ctx) => {
       return;
     }
 
+    if (step === "followup:create:title") {
+      const title = ctx.message.text.trim();
+      ctx.session.data.followupTitle = title;
+      ctx.session.step = "followup:create:project";
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      await ctx.reply("⏰ Follow-up — select a project:", {
+        reply_markup: projectPickerKeyboard(userId, "followup"),
+      });
+      return;
+    }
+
     if (step === "followup:create:deadline") {
       const deadline = ctx.message.text.trim();
-      const db = getDb();
-      const refTaskId = ctx.session.data.followupRefTaskId as number;
-      const userId = ctx.from?.id;
-      if (refTaskId && userId) {
-        db.prepare(
-          `INSERT INTO follow_ups (user_tg_id, ref_kind, ref_id, deadline)
-           VALUES (?, 'task', ?, ?)`,
-        ).run(userId, refTaskId, deadline);
+      ctx.session.data.followupDeadline = deadline;
+      ctx.session.step = "followup:create:priority";
+      const priorityKeyboard = new InlineKeyboard()
+        .text("🔴 High", "fw:pri:high")
+        .text("🟡 Medium", "fw:pri:med")
+        .text("🟢 Low", "fw:pri:low");
+      await ctx.reply("⏰ Deadline set. What's the priority?", {
+        reply_markup: priorityKeyboard,
+      });
+      return;
+    }
+
+    if (step === "followup:create:priority") {
+      const priorityRaw = ctx.message.text.trim().toLowerCase();
+      const validPriorities = ["high", "med", "medium", "low"] as const;
+      let priority: "high" | "med" | "low" = "med";
+      if (validPriorities.includes(priorityRaw as typeof validPriorities[number])) {
+        priority = (priorityRaw === "medium" ? "med" : priorityRaw) as
+          | "high"
+          | "med"
+          | "low";
+      } else {
+        await ctx.reply(
+          'Please pick a priority by clicking one of the buttons, or type "high", "med", or "low".',
+        );
+        return;
       }
-      ctx.session.data.followupRefTaskId = undefined;
+
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      const refKind = ctx.session.data.followupRefKind as string;
+      const refId = ctx.session.data.followupRefId as number;
+      const deadline = ctx.session.data.followupDeadline as string;
+      if (!refKind || !refId || !deadline) {
+        ctx.session.step = "idle";
+        await ctx.reply("⚠️ Something went wrong. Please try again.");
+        return;
+      }
+
+      const db = getDb();
+      db.prepare(
+        `INSERT INTO follow_ups (user_tg_id, ref_kind, ref_id, deadline, priority)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(userId, refKind, refId, deadline, priority);
+
+      const info = db.prepare("SELECT last_insert_rowid() as id").get() as {
+        id: number;
+      };
+      const priorityLabel =
+        priority === "high"
+          ? "🔴 High"
+          : priority === "med"
+          ? "🟡 Medium"
+          : "🟢 Low";
+
+      ctx.session.data.followupRefKind = undefined;
+      ctx.session.data.followupRefId = undefined;
+      ctx.session.data.followupDeadline = undefined;
+      ctx.session.data.followupProjectId = undefined;
       ctx.session.step = "idle";
-      await ctx.reply(`⏰ Follow-up set for: ${deadline}`);
+
+      await ctx.reply(
+        `⏰ Follow-up #${info.id} created! Deadline: ${deadline}, Priority: ${priorityLabel}`,
+      );
       return;
     }
 
