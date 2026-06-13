@@ -193,8 +193,39 @@ bot.command("tasks", async (ctx) => {
 
 // === Command: /decisions ===
 bot.command("decisions", async (ctx) => {
-  await ctx.reply("🧭 *Decisions*\n\nNo open decisions.", {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const db = getDb();
+  const decisions = db.prepare(
+    "SELECT id, context, choice, outcome, status, made_at FROM decisions WHERE user_tg_id = ? AND status = 'open' ORDER BY made_at DESC LIMIT 20",
+  ).all(userId) as { id: number; context: string; choice: string; outcome: string | null; status: string; made_at: string }[];
+
+  if (decisions.length === 0) {
+    await ctx.reply("🧭 *Decisions*\n\nNo open decisions.", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  const lines: string[] = ["🧭 *Decisions*"];
+  for (const d of decisions) {
+    lines.push("");
+    lines.push(`*#${d.id}* — ${d.context}`);
+    if (d.choice) lines.push(`  ↳ Choice: ${d.choice}`);
+    lines.push(`  _${d.made_at.slice(0, 16)}_`);
+  }
+
+  const keyboard = new InlineKeyboard();
+  for (const d of decisions) {
+    keyboard.text(`Resolve #${d.id}`, `dec:resolve:${d.id}`).row();
+  }
+
+  await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
+    reply_markup: keyboard,
   });
 });
 
@@ -420,10 +451,12 @@ bot.callbackQuery(/^tasks:filter:/, async (ctx) => {
 });
 
 // === Callback routing: decisions ===
-bot.callbackQuery(/^dec:resolve:/, async (ctx) => {
+bot.callbackQuery(/^dec:resolve:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
+  const decisionId = Number(ctx.match[1]);
+  ctx.session.data.resolvingDecisionId = decisionId;
   ctx.session.step = "decision:resolve:outcome";
-  await ctx.reply("🧭 What was the outcome?");
+  await ctx.reply("🧭 What was the outcome of this decision?");
 });
 
 // === Callback routing: risks ===
@@ -463,9 +496,15 @@ bot.callbackQuery(
            VALUES (?, ?, ?)`,
         )
         .run(projectId, userId, captureText);
+      ctx.session.data.pendingDecisionId = info.lastInsertRowid;
+      ctx.session.step = "decision:create:choice";
       await ctx.reply(
-        `🧭 Decision #${info.lastInsertRowid} logged: "${captureText}"`,
+        `🧭 Context logged: "${captureText}"\n\nWhat was the decision / which choice was made?`,
       );
+      ctx.session.captureText = undefined;
+      ctx.session.captureMsgId = undefined;
+      ctx.session.captureCategory = undefined;
+      return;
     } else if (category === "risk") {
       const info = db
         .prepare(
@@ -549,6 +588,24 @@ bot.on("message:text", async (ctx) => {
       return;
     }
 
+    if (step === "decision:create:choice") {
+      const choice = ctx.message.text.trim();
+      const decisionId = ctx.session.data.pendingDecisionId as number;
+      const userId = ctx.from?.id;
+      if (decisionId && userId) {
+        const db = getDb();
+        db.prepare(
+          `UPDATE decisions SET choice = ? WHERE id = ? AND user_tg_id = ?`,
+        ).run(choice, decisionId, userId);
+        await ctx.reply(
+          `🧭 Decision #${decisionId} confirmed: "${choice}"`,
+        );
+      }
+      ctx.session.step = "idle";
+      ctx.session.data.pendingDecisionId = undefined;
+      return;
+    }
+
     if (step === "risk:create:description") {
       const description = ctx.message.text.trim();
       ctx.session.data.riskDescription = description;
@@ -576,8 +633,19 @@ bot.on("message:text", async (ctx) => {
 
     if (step === "decision:resolve:outcome") {
       const outcome = ctx.message.text.trim();
+      const decisionId = ctx.session.data.resolvingDecisionId as number;
+      const userId = ctx.from?.id;
+      if (decisionId && userId) {
+        const db = getDb();
+        db.prepare(
+          `UPDATE decisions SET outcome = ?, status = 'resolved' WHERE id = ? AND user_tg_id = ?`,
+        ).run(outcome, decisionId, userId);
+        await ctx.reply(
+          `🧭 Decision #${decisionId} resolved: "${outcome}"`,
+        );
+      }
       ctx.session.step = "idle";
-      await ctx.reply(`🧭 Decision resolved: "${outcome}"`);
+      ctx.session.data.resolvingDecisionId = undefined;
       return;
     }
     return;
