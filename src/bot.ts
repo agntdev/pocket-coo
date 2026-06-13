@@ -1,0 +1,342 @@
+import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
+
+export interface BotSession {
+  step: string;
+  data: Record<string, unknown>;
+}
+
+function initialSession(): BotSession {
+  return { step: "idle", data: {} };
+}
+
+export type BotContext = Context & SessionFlavor<BotSession>;
+
+const token = process.env.BOT_TOKEN;
+if (!token) {
+  console.error("BOT_TOKEN environment variable is required");
+  process.exit(1);
+}
+
+export const bot = new Bot<BotContext>(token);
+
+bot.use(session({ initial: initialSession }));
+
+// === Command: /start ===
+bot.command("start", async (ctx) => {
+  const mainKeyboard = new InlineKeyboard()
+    .text("➕ Capture", "cat:new").row()
+    .text("📂 Projects", "proj:list")
+    .text("✅ Tasks", "tasks:list").row()
+    .text("📊 Digest", "digest:now");
+
+  await ctx.reply(
+    "👋 Welcome to Pocket COO!\n\n" +
+      "I help you turn chaotic chats into structured projects and tasks. " +
+      "Just forward me any message, voice note, or screenshot — I'll ask where it goes.",
+    { reply_markup: mainKeyboard },
+  );
+});
+
+// === Command: /help ===
+bot.command("help", async (ctx) => {
+  await ctx.reply(
+    "*Pocket COO — Command Reference*\n\n" +
+      "/start — Show main menu\n" +
+      "/capture — Categorize a forwarded message\n" +
+      "/projects — List active projects\n" +
+      "/newproject \<name\> — Create a new project\n" +
+      "/tasks — List pending tasks\n" +
+      "/decisions — List open decisions\n" +
+      "/risks — List open risks\n" +
+      "/followups — List pending follow-ups\n" +
+      "/digest — Show this week's digest\n" +
+      "/patterns — Show detected recurring phrases\n" +
+      "/export — Export all your data as JSON",
+    { parse_mode: "Markdown" },
+  );
+});
+
+// === Command: /capture ===
+bot.command("capture", async (ctx) => {
+  const rawText = ctx.match?.trim();
+  let content: string;
+  if (rawText && rawText.length > 0) {
+    content = rawText;
+  } else {
+    content = "_".repeat(0);
+    await ctx.reply(
+      "📥 Forward a message, voice note, or image to capture it. " +
+        "You can also type `/capture <your text>`.",
+    );
+    return;
+  }
+
+  const keyboard = new InlineKeyboard()
+    .text("✅ Task", `cat:task:0`)
+    .text("🧭 Decision", `cat:decision:0`).row()
+    .text("⚠️ Risk", `cat:risk:0`)
+    .text("⏰ Follow-up", `cat:followup:0`).row()
+    .text("🗑 Ignore", `cat:ignore:0`);
+
+  await ctx.reply(`📥 Got: ${content}`, { reply_markup: keyboard });
+});
+
+// === Command: /projects ===
+bot.command("projects", async (ctx) => {
+  const keyboard = new InlineKeyboard().text("➕ New Project", "proj:new");
+  await ctx.reply("📂 *Projects*\n\nNo active projects yet.", {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+});
+
+// === Command: /newproject ===
+bot.command("newproject", async (ctx) => {
+  const name = ctx.match?.trim();
+  if (!name) {
+    ctx.session.step = "project:create:name";
+    await ctx.reply("📂 What should the project be called?");
+    return;
+  }
+  await ctx.reply(`📂 Project "${name}" created!`);
+});
+
+// === Command: /tasks ===
+bot.command("tasks", async (ctx) => {
+  const keyboard = new InlineKeyboard()
+    .text("All", "tasks:filter:all")
+    .text("High Priority", "tasks:filter:high").row()
+    .text("➕ New Task", "tasks:new");
+
+  await ctx.reply("✅ *Tasks*\n\nNo pending tasks.", {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+});
+
+// === Command: /decisions ===
+bot.command("decisions", async (ctx) => {
+  await ctx.reply("🧭 *Decisions*\n\nNo open decisions.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Command: /risks ===
+bot.command("risks", async (ctx) => {
+  await ctx.reply("⚠️ *Risks*\n\nNo open risks.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Command: /followups ===
+bot.command("followups", async (ctx) => {
+  await ctx.reply("⏰ *Follow-ups*\n\nNo pending follow-ups.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Command: /digest ===
+bot.command("digest", async (ctx) => {
+  await ctx.reply("📊 *Weekly Digest*\n\nNo data yet this week.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Command: /patterns ===
+bot.command("patterns", async (ctx) => {
+  await ctx.reply("🔍 *Patterns*\n\nNo recurring phrases detected yet.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Command: /export ===
+bot.command("export", async (ctx) => {
+  await ctx.reply(
+    "📤 Export will be sent as a JSON file. Feature coming soon.",
+  );
+});
+
+// === Callback routing: capture categories ===
+bot.callbackQuery(/^cat:task:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "task:create:title";
+  await ctx.reply("✅ Task creation — what's the title?");
+});
+
+bot.callbackQuery(/^cat:decision:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "decision:create:context";
+  await ctx.reply("🧭 Decision — what's the context?");
+});
+
+bot.callbackQuery(/^cat:risk:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "risk:create:description";
+  await ctx.reply("⚠️ Risk — describe the risk:");
+});
+
+bot.callbackQuery(/^cat:followup:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "followup:create:deadline";
+  await ctx.reply("⏰ Follow-up — when is the deadline?");
+});
+
+bot.callbackQuery(/^cat:ignore:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageReplyMarkup(undefined);
+  await ctx.reply("🗑 Message ignored.");
+});
+
+bot.callbackQuery("cat:new", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard()
+    .text("✅ Task", "cat:task:0")
+    .text("🧭 Decision", "cat:decision:0").row()
+    .text("⚠️ Risk", "cat:risk:0")
+    .text("⏰ Follow-up", "cat:followup:0").row()
+    .text("🗑 Ignore", "cat:ignore:0");
+  await ctx.reply("📥 Send or forward your message:", {
+    reply_markup: keyboard,
+  });
+});
+
+// === Callback routing: projects ===
+bot.callbackQuery("proj:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard().text("➕ New Project", "proj:new");
+  await ctx.reply("📂 *Projects*\n\nNo active projects yet.", {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+});
+
+bot.callbackQuery("proj:new", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "project:create:name";
+  await ctx.reply("📂 What should the project be called?");
+});
+
+bot.callbackQuery(/^proj:archive:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("📦 Project archived.");
+});
+
+bot.callbackQuery(/^proj:open:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("📋 Project opened.");
+});
+
+// === Callback routing: tasks ===
+bot.callbackQuery("tasks:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard()
+    .text("All", "tasks:filter:all")
+    .text("High Priority", "tasks:filter:high").row()
+    .text("➕ New Task", "tasks:new");
+  await ctx.reply("✅ *Tasks*\n\nNo pending tasks.", {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+});
+
+bot.callbackQuery("tasks:new", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "task:create:title";
+  await ctx.reply("✅ Task creation — what's the title?");
+});
+
+bot.callbackQuery(/^tasks:done:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("✅ Task marked as done.");
+});
+
+bot.callbackQuery(/^tasks:filter:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("✅ Filter applied (to be implemented).");
+});
+
+// === Callback routing: decisions ===
+bot.callbackQuery(/^dec:resolve:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "decision:resolve:outcome";
+  await ctx.reply("🧭 What was the outcome?");
+});
+
+// === Callback routing: risks ===
+bot.callbackQuery(/^risk:close:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("📦 Risk closed.");
+});
+
+// === Callback routing: digest ===
+bot.callbackQuery("digest:now", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("📊 *Weekly Digest*\n\nNo data yet this week.", {
+    parse_mode: "Markdown",
+  });
+});
+
+// === Fallback for unrecognized callback data ===
+bot.callbackQuery(/.*/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  console.warn(`Unhandled callback data: ${ctx.callbackQuery.data}`);
+});
+
+// === Plain text message handler for FSM-driven flows ===
+bot.on("message:text", async (ctx) => {
+  const step = ctx.session.step;
+  if (!step || step === "idle") return;
+
+  if (step === "project:create:name") {
+    const projectName = ctx.message.text.trim();
+    ctx.session.step = "idle";
+    await ctx.reply(`📂 Project "${projectName}" created!`);
+    return;
+  }
+
+  if (step === "task:create:title") {
+    const title = ctx.message.text.trim();
+    ctx.session.data.taskTitle = title;
+    ctx.session.step = "idle";
+    await ctx.reply(`✅ Task "${title}" created!`);
+    return;
+  }
+
+  if (step === "decision:create:context") {
+    const context = ctx.message.text.trim();
+    ctx.session.data.decisionContext = context;
+    ctx.session.step = "idle";
+    await ctx.reply(`🧭 Decision logged: "${context}"`);
+    return;
+  }
+
+  if (step === "risk:create:description") {
+    const description = ctx.message.text.trim();
+    ctx.session.data.riskDescription = description;
+    ctx.session.step = "idle";
+    await ctx.reply(`⚠️ Risk logged: "${description}"`);
+    return;
+  }
+
+  if (step === "followup:create:deadline") {
+    const deadline = ctx.message.text.trim();
+    ctx.session.data.followupDeadline = deadline;
+    ctx.session.step = "idle";
+    await ctx.reply(`⏰ Follow-up set for: ${deadline}`);
+    return;
+  }
+
+  if (step === "decision:resolve:outcome") {
+    const outcome = ctx.message.text.trim();
+    ctx.session.step = "idle";
+    await ctx.reply(`🧭 Decision resolved: "${outcome}"`);
+    return;
+  }
+});
+
+// === Start long polling ===
+bot.start({
+  onStart(info) {
+    console.log(`Bot started as @${info.username}`);
+  },
+});
