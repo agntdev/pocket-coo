@@ -20,7 +20,11 @@ export interface BotSession {
   captureText?: string;
   captureMsgId?: number | bigint;
   captureCategory?: string;
+  tasksFilter?: string;
+  tasksPage?: number;
 }
+
+const TASKS_PER_PAGE = 5;
 
 function initialSession(): BotSession {
   return { step: "idle", data: {} };
@@ -150,6 +154,146 @@ function buildProjectsList(
   }
 
   keyboard.text("➕ New Project", "proj:new");
+
+  return { text: lines.join("\n"), keyboard };
+}
+
+function getTasksFilterLabel(filter: string): string {
+  switch (filter) {
+    case "high": return " · 🔴 High priority";
+    case "med": return " · 🟡 Medium priority";
+    case "low": return " · 🟢 Low priority";
+    case "due:today": return " · 📅 Due today";
+    case "due:week": return " · 📅 Due this week";
+    case "due:overdue": return " · ⏰ Overdue";
+    default:
+      if (filter.startsWith("proj:")) {
+        const projId = Number(filter.slice(5));
+        if (!isNaN(projId)) {
+          const db = getDb();
+          const proj = db.prepare("SELECT name FROM projects WHERE id = ?").get(projId) as { name: string } | undefined;
+          if (proj) return ` · 📁 ${proj.name}`;
+        }
+      }
+      return "";
+  }
+}
+
+function buildTasksList(
+  userId: number,
+  filter: string,
+  page: number,
+): { text: string; keyboard: InlineKeyboard } {
+  const db = getDb();
+  const normalizedFilter = filter === "all" ? "" : filter;
+  const params: unknown[] = [userId];
+  const conditions: string[] = ["t.user_tg_id = ?", "t.status = 'pending'"];
+
+  if (normalizedFilter === "high" || normalizedFilter === "med" || normalizedFilter === "low") {
+    conditions.push("t.priority = ?");
+    params.push(normalizedFilter);
+  } else if (normalizedFilter === "due:today") {
+    conditions.push("t.deadline = date('now')");
+  } else if (normalizedFilter === "due:week") {
+    conditions.push("t.deadline >= date('now') AND t.deadline <= date('now', '+7 days')");
+  } else if (normalizedFilter === "due:overdue") {
+    conditions.push("t.deadline < date('now') AND t.deadline IS NOT NULL AND t.deadline != ''");
+  } else if (normalizedFilter.startsWith("proj:")) {
+    const projId = Number(normalizedFilter.slice(5));
+    if (!isNaN(projId)) {
+      conditions.push("t.project_id = ?");
+      params.push(projId);
+    }
+  }
+
+  const where = conditions.join(" AND ");
+
+  const total = (
+    db
+      .prepare(`SELECT COUNT(*) as cnt FROM tasks t WHERE ${where}`)
+      .get(...params) as { cnt: number }
+  ).cnt;
+  const totalPages = Math.ceil(total / TASKS_PER_PAGE) || 1;
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+
+  const tasks = db
+    .prepare(
+      `SELECT t.id, t.title, t.priority, t.deadline, p.name as project_name
+       FROM tasks t
+       LEFT JOIN projects p ON t.project_id = p.id
+       WHERE ${where}
+       ORDER BY
+         CASE t.priority WHEN 'high' THEN 0 WHEN 'med' THEN 1 ELSE 2 END,
+         CASE WHEN t.deadline IS NULL OR t.deadline = '' THEN 1 ELSE 0 END,
+         t.deadline ASC,
+         t.created_at ASC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(
+      ...params,
+      TASKS_PER_PAGE,
+      safePage * TASKS_PER_PAGE,
+    ) as { id: number; title: string; priority: string; deadline: string | null; project_name: string | null }[];
+
+  const filterLabel = getTasksFilterLabel(filter);
+  const lines: string[] = [`✅ *Tasks*${filterLabel}\n`];
+
+  if (tasks.length === 0) {
+    lines.push("No pending tasks.");
+  } else {
+    for (const t of tasks) {
+      const prio =
+        t.priority === "high"
+          ? "🔴"
+          : t.priority === "med"
+            ? "🟡"
+            : "🟢";
+      const projStr = t.project_name ? ` · 📁 ${t.project_name}` : "";
+      const dlStr = t.deadline ? ` · ⏰ ${t.deadline}` : "";
+      lines.push(`${prio} *${t.title}*${projStr}${dlStr}`);
+    }
+  }
+
+  if (total > 0) {
+    lines.push(`\n_Page ${safePage + 1}/${totalPages}_`);
+  }
+
+  const keyboard = new InlineKeyboard();
+
+  for (const t of tasks) {
+    keyboard.text(`✅ Done #${t.id}`, `tasks:done:${t.id}`).row();
+  }
+
+  if (filter !== "high") keyboard.text("🔴 High", "tasks:filter:high");
+  if (filter !== "med") keyboard.text("🟡 Med", "tasks:filter:med");
+  if (filter !== "low") keyboard.text("🟢 Low", "tasks:filter:low");
+  if (filter !== "" && filter !== "all") {
+    keyboard.text("All", "tasks:filter:all");
+  }
+  keyboard.row();
+
+  if (filter !== "due:today") keyboard.text("📅 Today", "tasks:filter:due:today");
+  if (filter !== "due:week") keyboard.text("📅 Week", "tasks:filter:due:week");
+  if (filter !== "due:overdue") keyboard.text("⏰ Overdue", "tasks:filter:due:overdue");
+  keyboard.row();
+
+  const projects = db
+    .prepare(
+      "SELECT id, name FROM projects WHERE user_tg_id = ? AND status = 'active' ORDER BY name",
+    )
+    .all(userId) as { id: number; name: string }[];
+  for (const p of projects) {
+    keyboard.text(`📁 ${p.name}`, `tasks:filter:proj:${p.id}`).row();
+  }
+
+  if (totalPages > 1) {
+    if (safePage > 0) keyboard.text("◀️ Prev", `tasks:page:${safePage - 1}`);
+    keyboard.text(`${safePage + 1}/${totalPages}`, "tasks:noop");
+    if (safePage < totalPages - 1) keyboard.text("Next ▶️", `tasks:page:${safePage + 1}`);
+    keyboard.row();
+  }
+
+  keyboard.text("➕ New Task", "tasks:new");
 
   return { text: lines.join("\n"), keyboard };
 }
@@ -293,12 +437,12 @@ bot.command("newproject", async (ctx) => {
 
 // === Command: /tasks ===
 bot.command("tasks", async (ctx) => {
-  const keyboard = new InlineKeyboard()
-    .text("All", "tasks:filter:all")
-    .text("High Priority", "tasks:filter:high").row()
-    .text("➕ New Task", "tasks:new");
-
-  await ctx.reply("✅ *Tasks*\n\nNo pending tasks.", {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  ctx.session.tasksFilter = "";
+  ctx.session.tasksPage = 0;
+  const { text, keyboard } = buildTasksList(userId, "", 0);
+  await ctx.reply(text, {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
@@ -676,11 +820,12 @@ bot.callbackQuery(/^proj:open:(\d+)$/, async (ctx) => {
 // === Callback routing: tasks ===
 bot.callbackQuery("tasks:list", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const keyboard = new InlineKeyboard()
-    .text("All", "tasks:filter:all")
-    .text("High Priority", "tasks:filter:high").row()
-    .text("➕ New Task", "tasks:new");
-  await ctx.reply("✅ *Tasks*\n\nNo pending tasks.", {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  ctx.session.tasksFilter = "";
+  ctx.session.tasksPage = 0;
+  const { text, keyboard } = buildTasksList(userId, "", 0);
+  await ctx.reply(text, {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
@@ -692,14 +837,36 @@ bot.callbackQuery("tasks:new", async (ctx) => {
   await ctx.reply("✅ Task creation — what's the title?");
 });
 
-bot.callbackQuery(/^tasks:done:/, async (ctx) => {
+bot.callbackQuery(/^tasks:done:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("✅ Task marked as done.");
+  const taskId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "UPDATE tasks SET status = 'completed', completed_at = datetime('now') WHERE id = ? AND user_tg_id = ?",
+  ).run(taskId, userId);
+  const filter = ctx.session.tasksFilter || "";
+  const page = ctx.session.tasksPage || 0;
+  const { text, keyboard } = buildTasksList(userId, filter, page);
+  await ctx.reply(text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
 });
 
-bot.callbackQuery(/^tasks:filter:/, async (ctx) => {
+bot.callbackQuery(/^tasks:filter:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("✅ Filter applied (to be implemented).");
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const filterVal = ctx.match[1];
+  ctx.session.tasksFilter = filterVal;
+  ctx.session.tasksPage = 0;
+  const { text, keyboard } = buildTasksList(userId, filterVal, 0);
+  await ctx.reply(text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
 });
 
 // === Task creation: priority selection ===
@@ -1088,6 +1255,25 @@ bot.callbackQuery(/^fw:dismiss:(\d+)$/, async (ctx) => {
     `UPDATE follow_ups SET status = 'dismissed', notified_at = datetime('now') WHERE id = ? AND user_tg_id = ?`,
   ).run(fwId, userId);
   await ctx.reply(`❌ Follow-up #${fwId} dismissed.`);
+});
+
+// === Callback routing: tasks pagination ===
+bot.callbackQuery(/^tasks:page:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const page = Number(ctx.match[1]);
+  ctx.session.tasksPage = page;
+  const filter = ctx.session.tasksFilter || "";
+  const { text, keyboard } = buildTasksList(userId, filter, page);
+  await ctx.reply(text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+});
+
+bot.callbackQuery("tasks:noop", async (ctx) => {
+  await ctx.answerCallbackQuery();
 });
 
 // === Fallback for unrecognized callback data ===
