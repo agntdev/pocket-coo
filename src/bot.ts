@@ -1,4 +1,5 @@
-import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
+import { Bot, Context, session, SessionFlavor, InlineKeyboard, InputFile } from "grammy";
+import { getDb } from "./db/database";
 
 export interface BotSession {
   step: string;
@@ -151,8 +152,68 @@ bot.command("patterns", async (ctx) => {
 
 // === Command: /export ===
 bot.command("export", async (ctx) => {
-  await ctx.reply(
-    "📤 Export will be sent as a JSON file. Feature coming soon.",
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+
+  const db = getDb();
+
+  const user = db.prepare("SELECT * FROM users WHERE tg_id = ?").get(userId);
+
+  const projects = db.prepare(
+    "SELECT * FROM projects WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const tasks = db.prepare(
+    "SELECT * FROM tasks WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const decisions = db.prepare(
+    "SELECT * FROM decisions WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const risks = db.prepare(
+    "SELECT * FROM risks WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const followUps = db.prepare(
+    "SELECT * FROM follow_ups WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const messages = db.prepare(
+    "SELECT * FROM messages WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const summaries = db.prepare(
+    "SELECT * FROM summaries WHERE user_tg_id = ? ORDER BY week_start DESC LIMIT 4",
+  ).all(userId);
+
+  const patterns = db.prepare(
+    "SELECT * FROM patterns WHERE user_tg_id = ?",
+  ).all(userId);
+
+  const exportData = {
+    exported_at: new Date().toISOString(),
+    user,
+    projects,
+    tasks,
+    decisions,
+    risks,
+    follow_ups: followUps,
+    messages,
+    summaries,
+    patterns,
+  };
+
+  const json = JSON.stringify(exportData, null, 2);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const filename = `pocket-coo-export-${dateStr}.json`;
+
+  await ctx.replyWithDocument(
+    new InputFile(Buffer.from(json, "utf-8"), filename),
+    { caption: "📤 Here is your exported data." },
   );
 });
 
