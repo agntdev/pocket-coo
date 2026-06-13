@@ -240,8 +240,39 @@ bot.command("decisions", async (ctx) => {
 
 // === Command: /risks ===
 bot.command("risks", async (ctx) => {
-  await ctx.reply("⚠️ *Risks*\n\nNo open risks.", {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const db = getDb();
+  const risks = db.prepare(
+    "SELECT id, description, severity, mitigation, status FROM risks WHERE user_tg_id = ? AND status = 'open' ORDER BY id DESC LIMIT 20",
+  ).all(userId) as { id: number; description: string; severity: string; mitigation: string | null; status: string }[];
+
+  if (risks.length === 0) {
+    await ctx.reply("⚠️ *Risks*\n\nNo open risks.", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  const lines: string[] = ["⚠️ *Risks*"];
+  for (const r of risks) {
+    const sevLabel = r.severity === "high" ? "🔴" : r.severity === "med" ? "🟡" : "🟢";
+    lines.push("");
+    lines.push(`*#${r.id}* ${sevLabel} ${r.description}`);
+    if (r.mitigation) lines.push(`  ↳ Mitigation: ${r.mitigation}`);
+  }
+
+  const keyboard = new InlineKeyboard();
+  for (const r of risks) {
+    keyboard.text(`Mitigate #${r.id}`, `risk:close:${r.id}`).row();
+  }
+
+  await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
+    reply_markup: keyboard,
   });
 });
 
@@ -483,9 +514,34 @@ bot.callbackQuery(/^dec:resolve:(\d+)$/, async (ctx) => {
 });
 
 // === Callback routing: risks ===
-bot.callbackQuery(/^risk:close:/, async (ctx) => {
+bot.callbackQuery(/^risk:close:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("📦 Risk closed.");
+  const riskId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "UPDATE risks SET status = 'mitigated' WHERE id = ? AND user_tg_id = ?",
+  ).run(riskId, userId);
+  await ctx.reply(`⚠️ Risk #${riskId} mitigated.`);
+});
+
+bot.callbackQuery(/^risk:severity:(\d+):(low|med|high)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const riskId = Number(ctx.match[1]);
+  const severity = ctx.match[2];
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "UPDATE risks SET severity = ? WHERE id = ? AND user_tg_id = ?",
+  ).run(severity, riskId, userId);
+  ctx.session.data.pendingRiskId = riskId;
+  ctx.session.step = "risk:create:mitigation";
+  const sevLabel = severity === "high" ? "🔴 High" : severity === "med" ? "🟡 Med" : "🟢 Low";
+  await ctx.reply(
+    `⚠️ Severity set to ${sevLabel}.\n\nWhat mitigation do you have in mind? (send "-" to skip)`,
+  );
 });
 
 // === Callback routing: project picker for capture flow ===
@@ -535,9 +591,20 @@ bot.callbackQuery(
            VALUES (?, ?, ?)`,
         )
         .run(projectId, userId, captureText);
+      ctx.session.data.pendingRiskId = info.lastInsertRowid;
+      ctx.session.step = "risk:create:severity";
+      const severityKeyboard = new InlineKeyboard()
+        .text("🟢 Low", `risk:severity:${info.lastInsertRowid}:low`)
+        .text("🟡 Med", `risk:severity:${info.lastInsertRowid}:med`)
+        .text("🔴 High", `risk:severity:${info.lastInsertRowid}:high`);
       await ctx.reply(
-        `⚠️ Risk #${info.lastInsertRowid} logged: "${captureText}"`,
+        `⚠️ Risk #${info.lastInsertRowid} logged: "${captureText}"\n\nHow severe is this risk?`,
+        { reply_markup: severityKeyboard },
       );
+      ctx.session.captureText = undefined;
+      ctx.session.captureMsgId = undefined;
+      ctx.session.captureCategory = undefined;
+      return;
     } else if (category === "followup") {
       const taskInfo = db
         .prepare(
@@ -662,9 +729,43 @@ bot.on("message:text", async (ctx) => {
 
     if (step === "risk:create:description") {
       const description = ctx.message.text.trim();
-      ctx.session.data.riskDescription = description;
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      const db = getDb();
+      const info = db
+        .prepare(
+          `INSERT INTO risks (user_tg_id, description)
+           VALUES (?, ?)`,
+        )
+        .run(userId, description);
+      ctx.session.data.pendingRiskId = info.lastInsertRowid;
+      ctx.session.step = "risk:create:severity";
+      const severityKeyboard = new InlineKeyboard()
+        .text("🟢 Low", `risk:severity:${info.lastInsertRowid}:low`)
+        .text("🟡 Med", `risk:severity:${info.lastInsertRowid}:med`)
+        .text("🔴 High", `risk:severity:${info.lastInsertRowid}:high`);
+      await ctx.reply(
+        `⚠️ Risk #${info.lastInsertRowid} logged: "${description}"\n\nHow severe is this risk?`,
+        { reply_markup: severityKeyboard },
+      );
+      return;
+    }
+
+    if (step === "risk:create:mitigation") {
+      const mitigationText = ctx.message.text.trim();
+      const mitigation = mitigationText === "-" ? "" : mitigationText;
+      const riskId = ctx.session.data.pendingRiskId as number;
+      const userId = ctx.from?.id;
+      if (riskId && userId) {
+        const db = getDb();
+        db.prepare(
+          `UPDATE risks SET mitigation = ? WHERE id = ? AND user_tg_id = ?`,
+        ).run(mitigation, riskId, userId);
+      }
       ctx.session.step = "idle";
-      await ctx.reply(`⚠️ Risk logged: "${description}"`);
+      ctx.session.data.pendingRiskId = undefined;
+      const mitSuffix = mitigation ? `\n🛡 Mitigation: ${mitigation}` : " (no mitigation yet)";
+      await ctx.reply(`⚠️ Risk #${riskId} fully logged.${mitSuffix}`);
       return;
     }
 
