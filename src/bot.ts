@@ -35,6 +35,35 @@ function captureCardKeyboard(msgId: number | bigint): InlineKeyboard {
     .text("🗑 Ignore", `cat:ignore:${msgId}`);
 }
 
+async function showTaskConfirm(ctx: BotContext): Promise<void> {
+  ctx.session.step = "task:create:confirm";
+  const title = ctx.session.data.taskTitle as string;
+  const priority = (ctx.session.data.taskPriority as string) || "med";
+  const deadline = (ctx.session.data.taskDeadline as string) || "";
+
+  const priorityLabel =
+    priority === "high"
+      ? "🔴 High"
+      : priority === "med"
+      ? "🟡 Medium"
+      : "🟢 Low";
+  const deadlineDisplay = deadline || "No deadline";
+
+  const keyboard = new InlineKeyboard()
+    .text("✏️ Edit Title", "tasks:edit:title")
+    .text("✏️ Edit Priority", "tasks:edit:priority").row()
+    .text("✏️ Edit Deadline", "tasks:edit:deadline")
+    .text("💾 Save", "tasks:save").row();
+
+  await ctx.reply(
+    `✅ *Task Preview*\n\n` +
+      `Title: *${title}*\n` +
+      `Priority: ${priorityLabel}\n` +
+      `Deadline: ${deadlineDisplay}`,
+    { parse_mode: "Markdown", reply_markup: keyboard },
+  );
+}
+
 function projectPickerKeyboard(userId: number, category: string): InlineKeyboard {
   const db = getDb();
   const projects = db
@@ -673,6 +702,122 @@ bot.callbackQuery(/^tasks:filter:/, async (ctx) => {
   await ctx.reply("✅ Filter applied (to be implemented).");
 });
 
+// === Task creation: priority selection ===
+bot.callbackQuery(/^tasks:pri:(high|med|low)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const priority = ctx.match[1] as "high" | "med" | "low";
+  ctx.session.data.taskPriority = priority;
+  ctx.session.step = "task:create:deadline";
+
+  const title = ctx.session.data.taskTitle as string;
+  const priorityLabel =
+    priority === "high"
+      ? "🔴 High"
+      : priority === "med"
+      ? "🟡 Medium"
+      : "🟢 Low";
+
+  await ctx.reply(
+    `✅ Task: *${title}* (${priorityLabel})\n\n⏰ What's the deadline? (e.g. "tomorrow", "Friday", "2026-07-01", or send "-" to skip)`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+// === Task creation: inline editing from confirmation screen ===
+bot.callbackQuery("tasks:edit:title", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "task:create:title_edit";
+  const currentTitle = ctx.session.data.taskTitle as string;
+  await ctx.reply(
+    `✅ Editing title.\n\nCurrent: *${currentTitle}*\n\nSend the new title:`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+bot.callbackQuery("tasks:edit:priority", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "task:create:priority";
+  const currentPriority = (ctx.session.data.taskPriority as string) || "med";
+  const priorityLabel =
+    currentPriority === "high"
+      ? "🔴 High"
+      : currentPriority === "med"
+      ? "🟡 Medium"
+      : "🟢 Low";
+
+  const priorityKeyboard = new InlineKeyboard()
+    .text("🔴 High", "tasks:pri:high")
+    .text("🟡 Medium", "tasks:pri:med")
+    .text("🟢 Low", "tasks:pri:low");
+
+  await ctx.reply(
+    `✅ Editing priority.\n\nCurrent: ${priorityLabel}\n\nPick a new priority:`,
+    { reply_markup: priorityKeyboard },
+  );
+});
+
+bot.callbackQuery("tasks:edit:deadline", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  ctx.session.step = "task:create:deadline_edit";
+  const currentDeadline = (ctx.session.data.taskDeadline as string) || "";
+  const deadlineDisplay = currentDeadline || "None set";
+  await ctx.reply(
+    `✅ Editing deadline.\n\nCurrent: ${deadlineDisplay}\n\nSend the new deadline (or "-" to clear):`,
+  );
+});
+
+// === Task creation: save ===
+bot.callbackQuery("tasks:save", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const title = ctx.session.data.taskTitle as string;
+  const priority = (ctx.session.data.taskPriority as string) || "med";
+  const deadline = (ctx.session.data.taskDeadline as string) || null;
+  const projectId = ctx.session.data.taskProjectId as number | undefined;
+
+  if (!title) {
+    ctx.session.step = "idle";
+    await ctx.reply("⚠️ Something went wrong. Please try again.");
+    return;
+  }
+
+  const db = getDb();
+  db.prepare(
+    "INSERT INTO users (tg_id, name) VALUES (?, ?) ON CONFLICT(tg_id) DO UPDATE SET name = excluded.name",
+  ).run(userId, ctx.from?.username || ctx.from?.first_name || `user${userId}`);
+
+  const info = db
+    .prepare(
+      `INSERT INTO tasks (project_id, user_tg_id, title, priority, deadline, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+    )
+    .run(projectId != null ? projectId : null, userId, title, priority, deadline);
+
+  const priorityLabel =
+    priority === "high"
+      ? "🔴 High"
+      : priority === "med"
+      ? "🟡 Medium"
+      : "🟢 Low";
+  const deadlineDisplay = deadline || "No deadline";
+
+  ctx.session.data.taskTitle = undefined;
+  ctx.session.data.taskPriority = undefined;
+  ctx.session.data.taskDeadline = undefined;
+  ctx.session.data.taskProjectId = undefined;
+  ctx.session.step = "idle";
+
+  await ctx.reply(
+    `✅ Task #${info.lastInsertRowid} created!\n\n` +
+      `Title: *${title}*\n` +
+      `Priority: ${priorityLabel}\n` +
+      `Deadline: ${deadlineDisplay}`,
+    { parse_mode: "Markdown" },
+  );
+});
+
 // === Callback routing: decisions ===
 bot.callbackQuery(/^dec:resolve:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -996,8 +1141,70 @@ bot.on("message:text", async (ctx) => {
     if (step === "task:create:title") {
       const title = ctx.message.text.trim();
       ctx.session.data.taskTitle = title;
-      ctx.session.step = "idle";
-      await ctx.reply(`✅ Task "${title}" created!`);
+      ctx.session.step = "task:create:priority";
+
+      const priorityKeyboard = new InlineKeyboard()
+        .text("🔴 High", "tasks:pri:high")
+        .text("🟡 Medium", "tasks:pri:med")
+        .text("🟢 Low", "tasks:pri:low");
+
+      await ctx.reply(
+        `✅ Task title: *${title}*\n\nWhat's the priority?`,
+        { parse_mode: "Markdown", reply_markup: priorityKeyboard },
+      );
+      return;
+    }
+
+    if (step === "task:create:priority") {
+      const priorityRaw = ctx.message.text.trim().toLowerCase();
+      const validPriorities = ["high", "med", "medium", "low"] as const;
+      let priority: "high" | "med" | "low" | null = null;
+      if (validPriorities.includes(priorityRaw as typeof validPriorities[number])) {
+        priority = (priorityRaw === "medium" ? "med" : priorityRaw) as
+          | "high"
+          | "med"
+          | "low";
+        ctx.session.data.taskPriority = priority;
+        ctx.session.step = "task:create:deadline";
+        const title = ctx.session.data.taskTitle as string;
+        const priorityLabel =
+          priority === "high"
+            ? "🔴 High"
+            : priority === "med"
+            ? "🟡 Medium"
+            : "🟢 Low";
+        await ctx.reply(
+          `✅ Task: *${title}* (${priorityLabel})\n\n⏰ What's the deadline? (e.g. "tomorrow", "Friday", "2026-07-01", or send "-" to skip)`,
+          { parse_mode: "Markdown" },
+        );
+        return;
+      }
+      await ctx.reply(
+        'Please pick a priority by clicking one of the buttons, or type "high", "med", or "low".',
+      );
+      return;
+    }
+
+    if (step === "task:create:deadline") {
+      const deadlineRaw = ctx.message.text.trim();
+      const deadline = deadlineRaw === "-" ? "" : deadlineRaw;
+      ctx.session.data.taskDeadline = deadline;
+      await showTaskConfirm(ctx);
+      return;
+    }
+
+    if (step === "task:create:title_edit") {
+      const title = ctx.message.text.trim();
+      ctx.session.data.taskTitle = title;
+      await showTaskConfirm(ctx);
+      return;
+    }
+
+    if (step === "task:create:deadline_edit") {
+      const deadlineRaw = ctx.message.text.trim();
+      const deadline = deadlineRaw === "-" ? "" : deadlineRaw;
+      ctx.session.data.taskDeadline = deadline;
+      await showTaskConfirm(ctx);
       return;
     }
 
