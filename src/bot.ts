@@ -175,7 +175,16 @@ bot.command("newproject", async (ctx) => {
     await ctx.reply("📂 What should the project be called?");
     return;
   }
-  await ctx.reply(`📂 Project "${name}" created!`);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "INSERT INTO users (tg_id, name) VALUES (?, ?) ON CONFLICT(tg_id) DO UPDATE SET name = excluded.name",
+  ).run(userId, ctx.from?.username || ctx.from?.first_name || `user${userId}`);
+  const info = db
+    .prepare("INSERT INTO projects (user_tg_id, name) VALUES (?, ?)")
+    .run(userId, name);
+  await ctx.reply(`📂 Project "${name}" created! (#${info.lastInsertRowid})`);
 });
 
 // === Command: /tasks ===
@@ -380,13 +389,27 @@ bot.callbackQuery("proj:new", async (ctx) => {
   await ctx.reply("📂 What should the project be called?");
 });
 
-bot.callbackQuery(/^proj:archive:/, async (ctx) => {
+bot.callbackQuery(/^proj:archive:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
+  const projId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "UPDATE projects SET status = 'archived' WHERE id = ? AND user_tg_id = ?",
+  ).run(projId, userId);
   await ctx.reply("📦 Project archived.");
 });
 
-bot.callbackQuery(/^proj:open:/, async (ctx) => {
+bot.callbackQuery(/^proj:open:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
+  const projId = Number(ctx.match[1]);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const db = getDb();
+  db.prepare(
+    "UPDATE projects SET status = 'active' WHERE id = ? AND user_tg_id = ?",
+  ).run(projId, userId);
   await ctx.reply("📋 Project opened.");
 });
 
@@ -528,8 +551,39 @@ bot.on("message:text", async (ctx) => {
   if (step && step !== "idle") {
     if (step === "project:create:name") {
       const projectName = ctx.message.text.trim();
+      ctx.session.data.projectName = projectName;
+      ctx.session.step = "project:create:description";
+      await ctx.reply(
+        `📂 Project: *${projectName}*\n\nAdd a description? (or send "-" to skip)`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    if (step === "project:create:description") {
+      const description = ctx.message.text.trim();
+      const projectName = ctx.session.data.projectName as string;
+      const finalDescription = description === "-" ? "" : description;
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      const db = getDb();
+      db.prepare(
+        "INSERT INTO users (tg_id, name) VALUES (?, ?) ON CONFLICT(tg_id) DO UPDATE SET name = excluded.name",
+      ).run(userId, ctx.from?.username || ctx.from?.first_name || `user${userId}`);
+      const info = db
+        .prepare(
+          "INSERT INTO projects (user_tg_id, name, description) VALUES (?, ?, ?)",
+        )
+        .run(userId, projectName, finalDescription);
+      ctx.session.data.projectName = undefined;
       ctx.session.step = "idle";
-      await ctx.reply(`📂 Project "${projectName}" created!`);
+      const descSuffix = finalDescription
+        ? `\n📝 ${finalDescription}`
+        : "";
+      await ctx.reply(
+        `📂 Project *${projectName}* created! (#${info.lastInsertRowid})${descSuffix}`,
+        { parse_mode: "Markdown" },
+      );
       return;
     }
 
