@@ -8,6 +8,10 @@ import {
   type IntakeResult,
 } from "./services/message-intake";
 import { categorize, CATEGORY_LABELS } from "./services/categorizer";
+import {
+  getDigestMarkdown,
+  startDigestScheduler,
+} from "./services/weekly-digest";
 
 export interface BotSession {
   step: string;
@@ -181,9 +185,17 @@ bot.command("followups", async (ctx) => {
 
 // === Command: /digest ===
 bot.command("digest", async (ctx) => {
-  await ctx.reply("📊 *Weekly Digest*\n\nNo data yet this week.", {
-    parse_mode: "Markdown",
-  });
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const digestMd = getDigestMarkdown(userId);
+  try {
+    await ctx.reply(digestMd, { parse_mode: "Markdown" });
+  } catch {
+    await ctx.reply(digestMd);
+  }
 });
 
 // === Command: /patterns ===
@@ -375,9 +387,17 @@ bot.callbackQuery(/^risk:close:/, async (ctx) => {
 // === Callback routing: digest ===
 bot.callbackQuery("digest:now", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("📊 *Weekly Digest*\n\nNo data yet this week.", {
-    parse_mode: "Markdown",
-  });
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  const digestMd = getDigestMarkdown(userId);
+  try {
+    await ctx.reply(digestMd, { parse_mode: "Markdown" });
+  } catch {
+    await ctx.reply(digestMd);
+  }
 });
 
 // === Fallback for unrecognized callback data ===
@@ -469,6 +489,7 @@ bot.on("message:document", async (ctx) => {
 });
 
 // === Start long polling ===
+startDigestScheduler(bot);
 bot.start({
   onStart(info) {
     console.log(`Bot started as @${info.username}`);
