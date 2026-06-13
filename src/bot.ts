@@ -11,6 +11,9 @@ import {
 export interface BotSession {
   step: string;
   data: Record<string, unknown>;
+  captureText?: string;
+  captureMsgId?: number | bigint;
+  captureCategory?: string;
 }
 
 function initialSession(): BotSession {
@@ -26,10 +29,32 @@ function captureCardKeyboard(msgId: number | bigint): InlineKeyboard {
     .text("🗑 Ignore", `cat:ignore:${msgId}`);
 }
 
+function projectPickerKeyboard(userId: number, category: string): InlineKeyboard {
+  const db = getDb();
+  const projects = db
+    .prepare(
+      "SELECT id, name FROM projects WHERE user_tg_id = ? AND status = 'active' ORDER BY name",
+    )
+    .all(userId) as { id: number; name: string }[];
+
+  const keyboard = new InlineKeyboard();
+  if (projects.length > 0) {
+    for (const p of projects) {
+      keyboard.text(p.name, `proj:pick:${p.id}:${category}`).row();
+    }
+  }
+  keyboard.text("📂 No project", `proj:pick:none:${category}`);
+  return keyboard;
+}
+
 async function showCaptureCard(
   ctx: BotContext,
   result: IntakeResult,
 ): Promise<void> {
+  ctx.session.captureText = result.rawText;
+  ctx.session.captureMsgId = result.msgId;
+  ctx.session.captureCategory = undefined;
+
   const rawText = result.rawText;
   const truncated = rawText.length > 200
     ? rawText.slice(0, 200) + "…"
@@ -109,6 +134,10 @@ bot.command("capture", async (ctx) => {
     );
     return;
   }
+
+  ctx.session.captureText = content;
+  ctx.session.captureMsgId = 0;
+  ctx.session.captureCategory = undefined;
 
   const keyboard = new InlineKeyboard()
     .text("✅ Task", `cat:task:0`)
@@ -258,30 +287,49 @@ bot.command("export", async (ctx) => {
 // === Callback routing: capture categories ===
 bot.callbackQuery(/^cat:task:/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  ctx.session.step = "task:create:title";
-  await ctx.reply("✅ Task creation — what's the title?");
+  ctx.session.captureCategory = "task";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await ctx.reply("✅ Task — select a project:", {
+    reply_markup: projectPickerKeyboard(userId, "task"),
+  });
 });
 
 bot.callbackQuery(/^cat:decision:/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  ctx.session.step = "decision:create:context";
-  await ctx.reply("🧭 Decision — what's the context?");
+  ctx.session.captureCategory = "decision";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await ctx.reply("🧭 Decision — select a project:", {
+    reply_markup: projectPickerKeyboard(userId, "decision"),
+  });
 });
 
 bot.callbackQuery(/^cat:risk:/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  ctx.session.step = "risk:create:description";
-  await ctx.reply("⚠️ Risk — describe the risk:");
+  ctx.session.captureCategory = "risk";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await ctx.reply("⚠️ Risk — select a project:", {
+    reply_markup: projectPickerKeyboard(userId, "risk"),
+  });
 });
 
 bot.callbackQuery(/^cat:followup:/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  ctx.session.step = "followup:create:deadline";
-  await ctx.reply("⏰ Follow-up — when is the deadline?");
+  ctx.session.captureCategory = "followup";
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await ctx.reply("⏰ Follow-up — select a project:", {
+    reply_markup: projectPickerKeyboard(userId, "followup"),
+  });
 });
 
 bot.callbackQuery(/^cat:ignore:/, async (ctx) => {
   await ctx.answerCallbackQuery();
+  ctx.session.captureText = undefined;
+  ctx.session.captureMsgId = undefined;
+  ctx.session.captureCategory = undefined;
   await ctx.editMessageReplyMarkup(undefined);
   await ctx.reply("🗑 Message ignored.");
 });
@@ -367,6 +415,74 @@ bot.callbackQuery(/^risk:close:/, async (ctx) => {
   await ctx.reply("📦 Risk closed.");
 });
 
+// === Callback routing: project picker for capture flow ===
+bot.callbackQuery(
+  /^proj:pick:(.+):(task|decision|risk|followup)$/,
+  async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const [, projIdRaw, category] = ctx.match;
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const captureText = ctx.session.captureText || "";
+    const captureMsgId = ctx.session.captureMsgId;
+    const db = getDb();
+
+    const projectId: number | null =
+      projIdRaw === "none" ? null : Number(projIdRaw);
+
+    if (category === "task") {
+      const info = db
+        .prepare(
+          `INSERT INTO tasks (project_id, user_tg_id, title, source_message_id)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(projectId, userId, captureText, Number(captureMsgId) || null);
+      await ctx.reply(`✅ Task #${info.lastInsertRowid} created: "${captureText}"`);
+    } else if (category === "decision") {
+      const info = db
+        .prepare(
+          `INSERT INTO decisions (project_id, user_tg_id, context)
+           VALUES (?, ?, ?)`,
+        )
+        .run(projectId, userId, captureText);
+      await ctx.reply(
+        `🧭 Decision #${info.lastInsertRowid} logged: "${captureText}"`,
+      );
+    } else if (category === "risk") {
+      const info = db
+        .prepare(
+          `INSERT INTO risks (project_id, user_tg_id, description)
+           VALUES (?, ?, ?)`,
+        )
+        .run(projectId, userId, captureText);
+      await ctx.reply(
+        `⚠️ Risk #${info.lastInsertRowid} logged: "${captureText}"`,
+      );
+    } else if (category === "followup") {
+      const taskInfo = db
+        .prepare(
+          `INSERT INTO tasks (project_id, user_tg_id, title, source_message_id)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(projectId, userId, captureText, Number(captureMsgId) || null);
+      ctx.session.data.followupRefTaskId = taskInfo.lastInsertRowid;
+      ctx.session.step = "followup:create:deadline";
+      await ctx.reply(
+        `✅ Task #${taskInfo.lastInsertRowid} created as ref. ⏰ When is the deadline?`,
+      );
+      ctx.session.captureText = undefined;
+      ctx.session.captureMsgId = undefined;
+      ctx.session.captureCategory = undefined;
+      return;
+    }
+
+    ctx.session.captureText = undefined;
+    ctx.session.captureMsgId = undefined;
+    ctx.session.captureCategory = undefined;
+  },
+);
+
 // === Callback routing: digest ===
 bot.callbackQuery("digest:now", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -418,7 +534,16 @@ bot.on("message:text", async (ctx) => {
 
     if (step === "followup:create:deadline") {
       const deadline = ctx.message.text.trim();
-      ctx.session.data.followupDeadline = deadline;
+      const db = getDb();
+      const refTaskId = ctx.session.data.followupRefTaskId as number;
+      const userId = ctx.from?.id;
+      if (refTaskId && userId) {
+        db.prepare(
+          `INSERT INTO follow_ups (user_tg_id, ref_kind, ref_id, deadline)
+           VALUES (?, 'task', ?, ?)`,
+        ).run(userId, refTaskId, deadline);
+      }
+      ctx.session.data.followupRefTaskId = undefined;
       ctx.session.step = "idle";
       await ctx.reply(`⏰ Follow-up set for: ${deadline}`);
       return;
