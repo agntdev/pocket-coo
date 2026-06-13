@@ -52,6 +52,78 @@ function projectPickerKeyboard(userId: number, category: string): InlineKeyboard
   return keyboard;
 }
 
+function buildProjectsList(
+  userId: number,
+): { text: string; keyboard: InlineKeyboard } {
+  const db = getDb();
+  const projects = db
+    .prepare(
+      "SELECT id, name, description FROM projects WHERE user_tg_id = ? AND status = 'active' ORDER BY name",
+    )
+    .all(userId) as { id: number; name: string; description: string }[];
+
+  const keyboard = new InlineKeyboard();
+
+  if (projects.length === 0) {
+    keyboard.text("➕ New Project", "proj:new");
+    return {
+      text: "📂 *Projects*\n\nNo active projects yet.",
+      keyboard,
+    };
+  }
+
+  const lines: string[] = ["📂 *Projects*\n"];
+
+  for (const p of projects) {
+    const taskCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND status = 'pending'",
+        )
+        .get(p.id) as { cnt: number }
+    ).cnt;
+    const decisionCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM decisions WHERE project_id = ? AND status = 'open'",
+        )
+        .get(p.id) as { cnt: number }
+    ).cnt;
+    const riskCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM risks WHERE project_id = ? AND status = 'open'",
+        )
+        .get(p.id) as { cnt: number }
+    ).cnt;
+    const followUpCount = (
+      db
+        .prepare(
+          `SELECT COUNT(*) as cnt FROM follow_ups f
+           WHERE f.user_tg_id = ? AND f.status = 'pending'
+           AND (
+             (f.ref_kind = 'task' AND f.ref_id IN (SELECT id FROM tasks WHERE project_id = ?))
+             OR (f.ref_kind = 'decision' AND f.ref_id IN (SELECT id FROM decisions WHERE project_id = ?))
+             OR (f.ref_kind = 'risk' AND f.ref_id IN (SELECT id FROM risks WHERE project_id = ?))
+           )`,
+        )
+        .get(userId, p.id, p.id, p.id) as { cnt: number }
+    ).cnt;
+
+    const desc = p.description ? `\n📝 ${p.description}` : "";
+    lines.push(`📁 *${p.name}*${desc}`);
+    lines.push(
+      `✅ ${taskCount}  🧭 ${decisionCount}  ⚠️ ${riskCount}  ⏰ ${followUpCount}\n`,
+    );
+
+    keyboard.text(`📦 ${p.name}`, `proj:archive:${p.id}`).row();
+  }
+
+  keyboard.text("➕ New Project", "proj:new");
+
+  return { text: lines.join("\n"), keyboard };
+}
+
 async function showCaptureCard(
   ctx: BotContext,
   result: IntakeResult,
@@ -160,8 +232,10 @@ bot.command("capture", async (ctx) => {
 
 // === Command: /projects ===
 bot.command("projects", async (ctx) => {
-  const keyboard = new InlineKeyboard().text("➕ New Project", "proj:new");
-  await ctx.reply("📂 *Projects*\n\nNo active projects yet.", {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const { text, keyboard } = buildProjectsList(userId);
+  await ctx.reply(text, {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
@@ -376,8 +450,10 @@ bot.callbackQuery("cat:new", async (ctx) => {
 // === Callback routing: projects ===
 bot.callbackQuery("proj:list", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const keyboard = new InlineKeyboard().text("➕ New Project", "proj:new");
-  await ctx.reply("📂 *Projects*\n\nNo active projects yet.", {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const { text, keyboard } = buildProjectsList(userId);
+  await ctx.reply(text, {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
@@ -398,7 +474,11 @@ bot.callbackQuery(/^proj:archive:(\d+)$/, async (ctx) => {
   db.prepare(
     "UPDATE projects SET status = 'archived' WHERE id = ? AND user_tg_id = ?",
   ).run(projId, userId);
-  await ctx.reply("📦 Project archived.");
+  const { text, keyboard } = buildProjectsList(userId);
+  await ctx.reply(text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
 });
 
 bot.callbackQuery(/^proj:open:(\d+)$/, async (ctx) => {
@@ -410,7 +490,11 @@ bot.callbackQuery(/^proj:open:(\d+)$/, async (ctx) => {
   db.prepare(
     "UPDATE projects SET status = 'active' WHERE id = ? AND user_tg_id = ?",
   ).run(projId, userId);
-  await ctx.reply("📋 Project opened.");
+  const { text, keyboard } = buildProjectsList(userId);
+  await ctx.reply(text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
 });
 
 // === Callback routing: tasks ===
