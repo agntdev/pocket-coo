@@ -7,6 +7,7 @@ import {
   intakeDocumentMessage,
   type IntakeResult,
 } from "./services/message-intake";
+import { categorize, CATEGORY_LABELS } from "./services/categorizer";
 
 export interface BotSession {
   step: string;
@@ -42,10 +43,14 @@ async function showCaptureCard(
     document: "📎",
   };
 
-  await ctx.reply(
-    `${kindLabel[result.kind] || "📥"} Got: ${truncated}`,
-    { reply_markup: captureCardKeyboard(result.msgId) },
-  );
+  let header = `${kindLabel[result.kind] || "📥"} Got: ${truncated}`;
+
+  const suggestion = await categorize(rawText);
+  if (suggestion?.category) {
+    header += `\n\n💡 Suggested: ${CATEGORY_LABELS[suggestion.category]} (${suggestion.source})`;
+  }
+
+  await ctx.reply(header, { reply_markup: captureCardKeyboard(result.msgId) });
 }
 
 export type BotContext = Context & SessionFlavor<BotSession>;
