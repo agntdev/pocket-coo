@@ -1,5 +1,12 @@
 import { Bot, Context, session, SessionFlavor, InlineKeyboard, InputFile } from "grammy";
 import { getDb } from "./db/database";
+import {
+  intakeTextMessage,
+  intakeVoiceMessage,
+  intakePhotoMessage,
+  intakeDocumentMessage,
+  type IntakeResult,
+} from "./services/message-intake";
 
 export interface BotSession {
   step: string;
@@ -8,6 +15,37 @@ export interface BotSession {
 
 function initialSession(): BotSession {
   return { step: "idle", data: {} };
+}
+
+function captureCardKeyboard(msgId: number | bigint): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✅ Task", `cat:task:${msgId}`)
+    .text("🧭 Decision", `cat:decision:${msgId}`).row()
+    .text("⚠️ Risk", `cat:risk:${msgId}`)
+    .text("⏰ Follow-up", `cat:followup:${msgId}`).row()
+    .text("🗑 Ignore", `cat:ignore:${msgId}`);
+}
+
+async function showCaptureCard(
+  ctx: BotContext,
+  result: IntakeResult,
+): Promise<void> {
+  const rawText = result.rawText;
+  const truncated = rawText.length > 200
+    ? rawText.slice(0, 200) + "…"
+    : rawText;
+
+  const kindLabel: Record<string, string> = {
+    text: "📝",
+    voice: "🎙",
+    image: "🖼",
+    document: "📎",
+  };
+
+  await ctx.reply(
+    `${kindLabel[result.kind] || "📥"} Got: ${truncated}`,
+    { reply_markup: captureCardKeyboard(result.msgId) },
+  );
 }
 
 export type BotContext = Context & SessionFlavor<BotSession>;
@@ -346,52 +384,82 @@ bot.callbackQuery(/.*/, async (ctx) => {
 // === Plain text message handler for FSM-driven flows ===
 bot.on("message:text", async (ctx) => {
   const step = ctx.session.step;
-  if (!step || step === "idle") return;
+  if (step && step !== "idle") {
+    if (step === "project:create:name") {
+      const projectName = ctx.message.text.trim();
+      ctx.session.step = "idle";
+      await ctx.reply(`📂 Project "${projectName}" created!`);
+      return;
+    }
 
-  if (step === "project:create:name") {
-    const projectName = ctx.message.text.trim();
-    ctx.session.step = "idle";
-    await ctx.reply(`📂 Project "${projectName}" created!`);
+    if (step === "task:create:title") {
+      const title = ctx.message.text.trim();
+      ctx.session.data.taskTitle = title;
+      ctx.session.step = "idle";
+      await ctx.reply(`✅ Task "${title}" created!`);
+      return;
+    }
+
+    if (step === "decision:create:context") {
+      const context = ctx.message.text.trim();
+      ctx.session.data.decisionContext = context;
+      ctx.session.step = "idle";
+      await ctx.reply(`🧭 Decision logged: "${context}"`);
+      return;
+    }
+
+    if (step === "risk:create:description") {
+      const description = ctx.message.text.trim();
+      ctx.session.data.riskDescription = description;
+      ctx.session.step = "idle";
+      await ctx.reply(`⚠️ Risk logged: "${description}"`);
+      return;
+    }
+
+    if (step === "followup:create:deadline") {
+      const deadline = ctx.message.text.trim();
+      ctx.session.data.followupDeadline = deadline;
+      ctx.session.step = "idle";
+      await ctx.reply(`⏰ Follow-up set for: ${deadline}`);
+      return;
+    }
+
+    if (step === "decision:resolve:outcome") {
+      const outcome = ctx.message.text.trim();
+      ctx.session.step = "idle";
+      await ctx.reply(`🧭 Decision resolved: "${outcome}"`);
+      return;
+    }
     return;
   }
 
-  if (step === "task:create:title") {
-    const title = ctx.message.text.trim();
-    ctx.session.data.taskTitle = title;
-    ctx.session.step = "idle";
-    await ctx.reply(`✅ Task "${title}" created!`);
-    return;
+  const result = await intakeTextMessage(ctx);
+  if (result) {
+    await showCaptureCard(ctx, result);
   }
+});
 
-  if (step === "decision:create:context") {
-    const context = ctx.message.text.trim();
-    ctx.session.data.decisionContext = context;
-    ctx.session.step = "idle";
-    await ctx.reply(`🧭 Decision logged: "${context}"`);
-    return;
+// === Voice message handler ===
+bot.on("message:voice", async (ctx) => {
+  const result = await intakeVoiceMessage(ctx);
+  if (result) {
+    await showCaptureCard(ctx, result);
   }
+});
 
-  if (step === "risk:create:description") {
-    const description = ctx.message.text.trim();
-    ctx.session.data.riskDescription = description;
-    ctx.session.step = "idle";
-    await ctx.reply(`⚠️ Risk logged: "${description}"`);
-    return;
+// === Photo message handler ===
+bot.on("message:photo", async (ctx) => {
+  const result = await intakePhotoMessage(ctx);
+  if (result) {
+    await showCaptureCard(ctx, result);
   }
+});
 
-  if (step === "followup:create:deadline") {
-    const deadline = ctx.message.text.trim();
-    ctx.session.data.followupDeadline = deadline;
-    ctx.session.step = "idle";
-    await ctx.reply(`⏰ Follow-up set for: ${deadline}`);
-    return;
-  }
-
-  if (step === "decision:resolve:outcome") {
-    const outcome = ctx.message.text.trim();
-    ctx.session.step = "idle";
-    await ctx.reply(`🧭 Decision resolved: "${outcome}"`);
-    return;
+// === Document message handler ===
+bot.on("message:document", async (ctx) => {
+  const result = await intakeDocumentMessage(ctx);
+  if (result) {
+    await showCaptureCard(ctx, result);
   }
 });
 
