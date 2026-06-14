@@ -346,6 +346,10 @@ bot.command("start", async (ctx) => {
     .text("➕ Capture", "cat:new").row()
     .text("📂 Projects", "proj:list")
     .text("✅ Tasks", "tasks:list").row()
+    .text("🧭 Decisions", "dec:list")
+    .text("⚠️ Risks", "risks:list").row()
+    .text("⏰ Follow-ups", "followups:list")
+    .text("🔍 Patterns", "patterns:list").row()
     .text("📊 Digest", "digest:now");
 
   await ctx.reply(
@@ -449,20 +453,17 @@ bot.command("tasks", async (ctx) => {
 });
 
 // === Command: /decisions ===
-bot.command("decisions", async (ctx) => {
-  const userId = ctx.from?.id;
-  if (!userId) {
-    await ctx.reply("Could not identify your user account.");
-    return;
-  }
+async function renderDecisionsScreen(ctx: BotContext, userId: number): Promise<void> {
   const db = getDb();
   const decisions = db.prepare(
     "SELECT id, context, choice, outcome, status, made_at FROM decisions WHERE user_tg_id = ? AND status = 'open' ORDER BY made_at DESC LIMIT 20",
   ).all(userId) as { id: number; context: string; choice: string; outcome: string | null; status: string; made_at: string }[];
 
   if (decisions.length === 0) {
+    const keyboard = new InlineKeyboard().text("📋 Main Menu", "menu:main");
     await ctx.reply("🧭 *Decisions*\n\nNo open decisions.", {
       parse_mode: "Markdown",
+      reply_markup: keyboard,
     });
     return;
   }
@@ -479,28 +480,35 @@ bot.command("decisions", async (ctx) => {
   for (const d of decisions) {
     keyboard.text(`Resolve #${d.id}`, `dec:resolve:${d.id}`).row();
   }
+  keyboard.text("📋 Main Menu", "menu:main");
 
   await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
-});
+}
 
-// === Command: /risks ===
-bot.command("risks", async (ctx) => {
+bot.command("decisions", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) {
     await ctx.reply("Could not identify your user account.");
     return;
   }
+  await renderDecisionsScreen(ctx, userId);
+});
+
+// === Command: /risks ===
+async function renderRisksScreen(ctx: BotContext, userId: number): Promise<void> {
   const db = getDb();
   const risks = db.prepare(
     "SELECT id, description, severity, mitigation, status FROM risks WHERE user_tg_id = ? AND status = 'open' ORDER BY id DESC LIMIT 20",
   ).all(userId) as { id: number; description: string; severity: string; mitigation: string | null; status: string }[];
 
   if (risks.length === 0) {
+    const keyboard = new InlineKeyboard().text("📋 Main Menu", "menu:main");
     await ctx.reply("⚠️ *Risks*\n\nNo open risks.", {
       parse_mode: "Markdown",
+      reply_markup: keyboard,
     });
     return;
   }
@@ -517,20 +525,25 @@ bot.command("risks", async (ctx) => {
   for (const r of risks) {
     keyboard.text(`Mitigate #${r.id}`, `risk:close:${r.id}`).row();
   }
+  keyboard.text("📋 Main Menu", "menu:main");
 
   await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
-});
+}
 
-// === Command: /followups ===
-bot.command("followups", async (ctx) => {
+bot.command("risks", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) {
     await ctx.reply("Could not identify your user account.");
     return;
   }
+  await renderRisksScreen(ctx, userId);
+});
+
+// === Command: /followups ===
+async function renderFollowupsScreen(ctx: BotContext, userId: number): Promise<void> {
   const db = getDb();
   const followUps = db
     .prepare(
@@ -556,10 +569,9 @@ bot.command("followups", async (ctx) => {
   }[];
 
   if (followUps.length === 0) {
-    const keyboard = new InlineKeyboard().text(
-      "➕ New Follow-up",
-      "followups:new",
-    );
+    const keyboard = new InlineKeyboard()
+      .text("➕ New Follow-up", "followups:new").row()
+      .text("📋 Main Menu", "menu:main");
     await ctx.reply("⏰ *Follow-ups*\n\nNo pending follow-ups.", {
       parse_mode: "Markdown",
       reply_markup: keyboard,
@@ -587,12 +599,22 @@ bot.command("followups", async (ctx) => {
     keyboard.text(`✅ Done #${f.id}`, `fw:done:${f.id}`);
     keyboard.text(`❌ Dismiss #${f.id}`, `fw:dismiss:${f.id}`).row();
   }
-  keyboard.text("➕ New Follow-up", "followups:new");
+  keyboard.text("➕ New Follow-up", "followups:new").row();
+  keyboard.text("📋 Main Menu", "menu:main");
 
   await ctx.reply(lines.join("\n"), {
     parse_mode: "Markdown",
     reply_markup: keyboard,
   });
+}
+
+bot.command("followups", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  await renderFollowupsScreen(ctx, userId);
 });
 
 // === Command: /digest ===
@@ -611,20 +633,18 @@ bot.command("digest", async (ctx) => {
 });
 
 // === Command: /patterns ===
-bot.command("patterns", async (ctx) => {
-  const userId = ctx.from?.id;
-  if (!userId) {
-    await ctx.reply("Could not identify your user account.");
-    return;
-  }
+async function renderPatternsScreen(ctx: BotContext, userId: number): Promise<void> {
   const db = getDb();
   const patterns = db.prepare(
     "SELECT phrase, occurrences FROM patterns WHERE user_tg_id = ? ORDER BY occurrences DESC LIMIT 10",
   ).all(userId) as { phrase: string; occurrences: number }[];
 
+  const keyboard = new InlineKeyboard().text("📋 Main Menu", "menu:main");
+
   if (patterns.length === 0) {
     await ctx.reply("🔍 *Patterns*\n\nNo recurring phrases detected yet.", {
       parse_mode: "Markdown",
+      reply_markup: keyboard,
     });
     return;
   }
@@ -634,7 +654,19 @@ bot.command("patterns", async (ctx) => {
     lines.push(`  • "${p.phrase}" — ${p.occurrences}×`);
   }
 
-  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+  await ctx.reply(lines.join("\n"), {
+    parse_mode: "Markdown",
+    reply_markup: keyboard,
+  });
+}
+
+bot.command("patterns", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("Could not identify your user account.");
+    return;
+  }
+  await renderPatternsScreen(ctx, userId);
 });
 
 // === Command: /export ===
@@ -1274,6 +1306,55 @@ bot.callbackQuery(/^tasks:page:(\d+)$/, async (ctx) => {
 
 bot.callbackQuery("tasks:noop", async (ctx) => {
   await ctx.answerCallbackQuery();
+});
+
+// === Callback routing: navigation screens ===
+bot.callbackQuery("dec:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await renderDecisionsScreen(ctx, userId);
+});
+
+bot.callbackQuery("risks:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await renderRisksScreen(ctx, userId);
+});
+
+bot.callbackQuery("followups:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await renderFollowupsScreen(ctx, userId);
+});
+
+bot.callbackQuery("patterns:list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  await renderPatternsScreen(ctx, userId);
+});
+
+bot.callbackQuery("menu:main", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const mainKeyboard = new InlineKeyboard()
+    .text("➕ Capture", "cat:new").row()
+    .text("📂 Projects", "proj:list")
+    .text("✅ Tasks", "tasks:list").row()
+    .text("🧭 Decisions", "dec:list")
+    .text("⚠️ Risks", "risks:list").row()
+    .text("⏰ Follow-ups", "followups:list")
+    .text("🔍 Patterns", "patterns:list").row()
+    .text("📊 Digest", "digest:now");
+
+  await ctx.reply(
+    "👋 Welcome to Pocket COO!\n\n" +
+      "I help you turn chaotic chats into structured projects and tasks. " +
+      "Just forward me any message, voice note, or screenshot — I'll ask where it goes.",
+    { reply_markup: mainKeyboard },
+  );
 });
 
 // === Fallback for unrecognized callback data ===
