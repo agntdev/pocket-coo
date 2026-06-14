@@ -13,6 +13,7 @@ import {
   startDigestScheduler,
 } from "./services/weekly-digest";
 import { startPatternScheduler } from "./services/pattern-detection";
+import { startReminderSweep } from "./services/reminder-sweep";
 
 export interface BotSession {
   step: string;
@@ -1677,6 +1678,7 @@ bot.on("message:document", async (ctx) => {
 // === Start long polling ===
 startDigestScheduler(bot);
 startPatternScheduler(bot);
+startReminderSweep(bot);
 bot.start({
   onStart(info) {
     console.log(`Bot started as @${info.username}`);
